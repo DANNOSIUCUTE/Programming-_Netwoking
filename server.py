@@ -7,7 +7,7 @@ import hashlib
 SERVER_IP = "0.0.0.0"
 SERVER_PORT = 12345
 CHUNK_SIZE = 4096  # Kích thước nhỏ của gói tin khi gửi (nếu cần chia nhỏ hơn)
-TIMEOUT = 10  # Timeout chờ ACK
+TIMEOUT = 15  # Timeout chờ ACK
 FILE_LIST = "files.txt"
 
 def compute_checksum(data):

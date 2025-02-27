@@ -5,11 +5,15 @@ import threading
 import struct
 import os
 import hashlib
+import math
 
 # Cấu hình Server
 SERVER_IP = "192.168.1.8"
 SERVER_PORT = 12345
 TOTAL_CHUNKS = 4  # Số phần chia file
+# Phải khớp với server: MAX_UDP_PAYLOAD và HEADER_SIZE
+MAX_UDP_PAYLOAD = 60000
+SEGMENT_HEADER_SIZE = 44  # 4+4+4+32
 
 class DownloadClient:
     def __init__(self, root):
@@ -17,26 +21,18 @@ class DownloadClient:
         self.root.title("UDP File Downloader")
         self.root.geometry("500x400")
 
-        # Label và danh sách file từ server
         ttk.Label(root, text="Available Files:", font=("Arial", 12)).pack(pady=5)
         self.file_listbox = tk.Listbox(root, height=10, selectmode=tk.SINGLE)
         self.file_listbox.pack(fill=tk.BOTH, padx=10, pady=5, expand=True)
 
-        # Nút lấy danh sách file từ Server
         self.refresh_button = ttk.Button(root, text="Refresh List", command=self.get_file_list)
         self.refresh_button.pack(pady=5)
-
-        # Nút tải file
         self.download_button = ttk.Button(root, text="Download", command=self.start_download)
         self.download_button.pack(pady=5)
-
-        # Progress Bar
         self.progress = ttk.Progressbar(root, length=400, mode="determinate")
         self.progress.pack(pady=5)
 
-        # Cập nhật danh sách file tự động mỗi 5s
         self.periodic_file_list_update()
-        # Bắt sự kiện Ctrl+C để thoát ứng dụng
         self.root.bind("<Control-c>", self.handle_ctrl_c)
 
         self.get_file_list()
@@ -75,7 +71,7 @@ class DownloadClient:
 
     def download_file(self, filename):
         self.progress["value"] = 0
-        # Gửi yêu cầu DOWNLOAD để nhận kích thước file
+        # Gửi yêu cầu DOWNLOAD để nhận file size
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.sendto(f"DOWNLOAD {filename}".encode(), (SERVER_IP, SERVER_PORT))
         data, _ = sock.recvfrom(1024)
@@ -85,7 +81,7 @@ class DownloadClient:
             messagebox.showerror("Error", "Invalid file size received!")
             return
 
-        # Tính toán offset và size cho từng phần
+        # Chia file thành TOTAL_CHUNKS phần
         part_size = file_size // TOTAL_CHUNKS
         sizes = [part_size] * TOTAL_CHUNKS
         remainder = file_size - part_size * TOTAL_CHUNKS
@@ -93,14 +89,13 @@ class DownloadClient:
         offsets = [i * part_size for i in range(TOTAL_CHUNKS)]
         downloaded_parts = [False] * TOTAL_CHUNKS
 
-        # Hàm download_part đã được cập nhật ở trên
         def download_part(part_id, offset, size):
             sock_part = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock_part.settimeout(10)
+            sock_part.settimeout(15)
             request = f"CHUNK {filename} {offset} {size} {part_id}"
             sock_part.sendto(request.encode(), (SERVER_IP, SERVER_PORT))
             
-            segments = {}
+            segments = {}  # Lưu các segment theo segment_no
             total_segments = None
 
             while True:
@@ -108,13 +103,18 @@ class DownloadClient:
                     packet, _ = sock_part.recvfrom(65535)
                 except socket.timeout:
                     break
-                if len(packet) < 44:
+                if len(packet) < SEGMENT_HEADER_SIZE:
                     print(f"Error: Packet too small for part {part_id}")
                     continue
+                # Giải mã header: 4 byte part_id, 4 byte segment_no, 4 byte total_segments, 32 byte checksum
                 recv_part_id = struct.unpack("!I", packet[:4])[0]
                 segment_no = struct.unpack("!I", packet[4:8])[0]
                 total_seg = struct.unpack("!I", packet[8:12])[0]
-                checksum = packet[12:44].decode()
+                try:
+                    checksum = packet[12:44].decode()
+                except UnicodeDecodeError as e:
+                    print(f"UnicodeDecodeError in part {part_id} segment {segment_no}: {e}")
+                    continue
                 seg_data = packet[44:]
                 
                 if recv_part_id != part_id:
@@ -124,17 +124,20 @@ class DownloadClient:
                     print(f"Checksum mismatch for part {part_id} segment {segment_no}")
                     continue
                 segments[segment_no] = seg_data
-                # Gửi ACK cho segment
+                # Gửi ACK cho segment (8 byte: part_id, segment_no)
                 ack_packet = struct.pack("!II", part_id, segment_no)
                 sock_part.sendto(ack_packet, (SERVER_IP, SERVER_PORT))
                 print(f"Received segment {segment_no} for part {part_id}, ACK sent.")
                 if total_segments is None:
                     total_segments = total_seg
+                    print(f"Part {part_id} expects {total_segments} segments.")
                 if total_segments is not None and len(segments) >= total_segments:
                     break
             sock_part.close()
+
             if total_segments is None or len(segments) < total_segments:
-                print(f"Timeout while downloading part {part_id}. Missing segments: {set(range(total_segments)) - set(segments.keys()) if total_segments else 'unknown'}")
+                missing = set(range(total_segments)) - set(segments.keys()) if total_segments is not None else "unknown"
+                print(f"Timeout while downloading part {part_id}. Missing segments: {missing}")
                 return
             try:
                 part_data = b''.join(segments[i] for i in range(total_segments))

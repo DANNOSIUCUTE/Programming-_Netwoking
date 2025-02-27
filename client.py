@@ -100,7 +100,7 @@ class DownloadClient:
 
         def download_part(part_id, offset, size):
             sock_part = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock_part.settimeout(10)
+            sock_part.settimeout(15)
             # Yêu cầu: "CHUNK <filename> <offset> <size> <part_id>"
             request = f"CHUNK {filename} {offset} {size} {part_id}"
             sock_part.sendto(request.encode(), (SERVER_IP, SERVER_PORT))
