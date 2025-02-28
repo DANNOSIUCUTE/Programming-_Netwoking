@@ -24,21 +24,18 @@ class DownloadClient:
         self.file_listbox = tk.Listbox(root, height=10, selectmode=tk.SINGLE)
         self.file_listbox.pack(fill=tk.BOTH, padx=10, pady=5, expand=True)
 
+        # Nút cập nhật file list
         self.refresh_button = ttk.Button(root, text="Refresh List", command=self.get_file_list)
         self.refresh_button.pack(pady=5)
 
-        # Frame (nếu cần) để hiển thị tiến độ chung – hiện tại ta dùng tiến độ riêng cho mỗi file download
-        # self.progress = ttk.Progressbar(root, length=400, mode="determinate")
-        # self.progress.pack(pady=5)
+        # Nút download file được chọn
+        self.download_button = ttk.Button(root, text="Download Selected", command=self.start_download)
+        self.download_button.pack(pady=5)
 
         self.periodic_file_list_update()
         self.root.bind("<Control-c>", self.handle_ctrl_c)
 
         self.get_file_list()
-
-        # Set để lưu tên file đã xử lý từ input.txt
-        self.processed_files = set()
-        self.scan_input_file()  # bắt đầu quét input.txt
 
     def periodic_file_list_update(self):
         self.get_file_list()
@@ -70,20 +67,6 @@ class DownloadClient:
 
     def compute_checksum(self, data):
         return hashlib.md5(data).hexdigest()
-
-    def scan_input_file(self):
-        try:
-            if os.path.exists("input.txt"):
-                with open("input.txt", "r") as f:
-                    lines = f.read().splitlines()
-                for file in lines:
-                    if file and file not in self.processed_files:
-                        self.processed_files.add(file)
-                        # Bắt đầu download file mới trên luồng riêng
-                        threading.Thread(target=self.download_file, args=(file,), daemon=True).start()
-        except Exception as e:
-            print("Error scanning input file:", e)
-        self.root.after(5000, self.scan_input_file)
 
     def start_download(self):
         selected_file = self.file_listbox.get(tk.ACTIVE)
@@ -141,7 +124,6 @@ class DownloadClient:
                 request = f"CHUNK {filename} {offset} {size} {part_id}"
                 sock_part.sendto(request.encode(), (SERVER_IP, SERVER_PORT))
                 try:
-                    # Nhận gói tin chứa dữ liệu cho phần này
                     received_packet, _ = sock_part.recvfrom(65535)
                     if received_packet.startswith(b"ERROR:"):
                         print(f"Server error for part {part_id}: {received_packet.decode()}")
@@ -163,9 +145,9 @@ class DownloadClient:
                         attempts += 1
                         continue
 
-                    # Giả lập cập nhật tiến độ nhận dữ liệu theo 10 bước (do gói tin được nhận một lần)
+                    # Cập nhật tiến độ từng chunk (giả lập 10 bước)
                     for step in range(10):
-                        time.sleep(0.05)  # giả lập độ trễ giữa các bước
+                        time.sleep(0.05)
                         progress = int((step + 1) * 10)
                         self.root.after(0, lambda p=progress, lbl=progress_label: lbl.config(text=f"Part {part_id+1}: {p}%"))
                     # Lưu dữ liệu vào file tạm
