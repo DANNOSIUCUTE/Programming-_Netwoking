@@ -11,7 +11,7 @@ import time
 SERVER_IP = "192.168.1.8"  # Địa chỉ IP của server
 SERVER_PORT = 12345
 TOTAL_CHUNKS = 4         # Số kết nối/chunk theo yêu cầu đồ án
-CHUNK_TIMEOUT = 1       # Timeout cho mỗi chunk
+CHUNK_TIMEOUT = 1        # Timeout cho việc nhận các segment của 1 chunk
 MAX_RETRIES = 3
 
 class DownloadClient:
@@ -114,85 +114,98 @@ class DownloadClient:
         remainder = file_size - part_size * TOTAL_CHUNKS
         sizes[-1] += remainder
         offsets = [i * part_size for i in range(TOTAL_CHUNKS)]
-        downloaded_parts = [False] * TOTAL_CHUNKS
 
+        # Hàm download_part: nhận dữ liệu của 1 chunk được chia thành nhiều segment nhỏ theo sliding window
+        # Header của mỗi segment: part_id (4 byte), sequence_number (4 byte),
+        # total_segments (4 byte), checksum (32 byte) => tổng HEADER_SIZE = 44 byte
         def download_part(part_id, offset, size, progress_label):
             attempts = 0
-            while attempts < MAX_RETRIES:
+            chunk_data = None
+            HEADER_FORMAT = "!III32s"  # Định nghĩa header
+            HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
+            while attempts < MAX_RETRIES and chunk_data is None:
                 sock_part = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 sock_part.settimeout(CHUNK_TIMEOUT)
                 request = f"CHUNK {filename} {offset} {size} {part_id}"
                 sock_part.sendto(request.encode(), (SERVER_IP, SERVER_PORT))
-                try:
-                    received_packet, _ = sock_part.recvfrom(65535)
-                    if received_packet.startswith(b"ERROR:"):
-                        print(f"Server error for part {part_id}: {received_packet.decode()}")
-                        attempts += 1
+                segments = {}
+                expected_segments = None
+                start_time = time.time()
+                while True:
+                    try:
+                        packet, _ = sock_part.recvfrom(65535)
+                    except socket.timeout:
+                        # Hết thời gian chờ, break để retry
+                        break
+                    if packet.startswith(b"ERROR:"):
+                        print(f"Server error for part {part_id}: {packet.decode()}")
                         continue
-                    if len(received_packet) < 36:
-                        print(f"Error: Packet too small for part {part_id}")
-                        attempts += 1
+                    if len(packet) < HEADER_SIZE:
+                        print(f"Packet too small for part {part_id}")
                         continue
-                    recv_part_id = struct.unpack("!I", received_packet[:4])[0]
-                    checksum = received_packet[4:36].decode()
-                    data = received_packet[36:]
-                    if recv_part_id != part_id:
-                        print(f"Error: Expected part {part_id}, but got {recv_part_id}")
-                        attempts += 1
+                    header = packet[:HEADER_SIZE]
+                    part_id_recv, seq, tot_seg, chksum_bytes = struct.unpack(HEADER_FORMAT, header)
+                    if part_id_recv != part_id:
                         continue
-                    if self.compute_checksum(data) != checksum:
-                        print(f"Checksum mismatch for part {part_id}")
-                        attempts += 1
+                    if expected_segments is None:
+                        expected_segments = tot_seg
+                    data_segment = packet[HEADER_SIZE:]
+                    computed_checksum = hashlib.md5(data_segment).hexdigest()
+                    expected_checksum = chksum_bytes.decode()
+                    if computed_checksum != expected_checksum:
+                        print(f"Checksum mismatch for part {part_id}, segment {seq}")
                         continue
-
-                    # Cập nhật tiến độ từng chunk (giả lập 10 bước)
-                    for step in range(10):
-                        time.sleep(0.05)
-                        progress = int((step + 1) * 10)
-                        self.root.after(0, lambda p=progress, lbl=progress_label: lbl.config(text=f"Part {part_id+1}: {p}%"))
-                    # Lưu dữ liệu vào file tạm
-                    with open(f"{filename}.part{part_id}", "wb") as f:
-                        f.write(data)
-                    downloaded_parts[part_id] = True
-
-                    # Gửi ACK về server
-                    sock_part.sendto(struct.pack("!I", part_id), (SERVER_IP, SERVER_PORT))
-                    print(f"Received and ACK sent for part {part_id}")
-                    sock_part.close()
-                    break
-                except socket.timeout:
+                    # Lưu segment nếu chưa nhận
+                    if seq not in segments:
+                        segments[seq] = data_segment
+                        # Gửi ACK cho segment (ACK gồm part_id và sequence_number)
+                        ack_packet = struct.pack("!II", part_id, seq)
+                        sock_part.sendto(ack_packet, (SERVER_IP, SERVER_PORT))
+                        # Cập nhật tiến độ (dựa trên số segment nhận được)
+                        if expected_segments:
+                            progress = int((len(segments) / expected_segments) * 100)
+                            self.root.after(0, lambda p=progress, lbl=progress_label: lbl.config(text=f"Part {part_id+1}: {p}%"))
+                    if expected_segments is not None and len(segments) == expected_segments:
+                        break
+                    if time.time() - start_time > CHUNK_TIMEOUT:
+                        break
+                sock_part.close()
+                if expected_segments is not None and len(segments) == expected_segments:
+                    # Ghép các segment theo thứ tự tăng dần của sequence number
+                    chunk_data = b"".join(segments[i] for i in sorted(segments))
+                else:
                     attempts += 1
-                    print(f"Timeout while downloading part {part_id}, retrying... (Attempt {attempts}/{MAX_RETRIES})")
-                finally:
-                    sock_part.close()
-            if attempts == MAX_RETRIES:
-                print(f"Failed to download part {part_id} after {MAX_RETRIES} attempts.")
+                    print(f"Retrying part {part_id}, attempt {attempts}")
+            if chunk_data is None:
                 self.root.after(0, lambda lbl=progress_label: lbl.config(text=f"Part {part_id+1}: Failed"))
+                return None
+            else:
+                self.root.after(0, lambda lbl=progress_label: lbl.config(text=f"Part {part_id+1}: 100%"))
+                return chunk_data
 
         threads = []
+        results = [None] * TOTAL_CHUNKS
+        def thread_download(i):
+            data_part = download_part(i, offsets[i], sizes[i], chunk_labels[i])
+            results[i] = data_part
+
         for i in range(TOTAL_CHUNKS):
-            t = threading.Thread(target=download_part, args=(i, offsets[i], sizes[i], chunk_labels[i]))
+            t = threading.Thread(target=thread_download, args=(i,))
             threads.append(t)
             t.start()
         for t in threads:
             t.join()
 
-        if not all(downloaded_parts):
-            missing = [i for i, done in enumerate(downloaded_parts) if not done]
+        if any(r is None for r in results):
+            missing = [i for i, r in enumerate(results) if r is None]
             messagebox.showerror("Error", f"Download failed! Missing parts: {missing}")
             return
 
-        self.merge_parts(filename)
-        messagebox.showinfo("Download Complete", f"File {filename} downloaded successfully!")
-
-    def merge_parts(self, filename):
-        """Ghép các phần đã tải thành file hoàn chỉnh và xóa file tạm"""
+        # Ghi dữ liệu thành file hoàn chỉnh và hiển thị thông báo
         with open(filename, "wb") as outfile:
             for i in range(TOTAL_CHUNKS):
-                part_filename = f"{filename}.part{i}"
-                with open(part_filename, "rb") as infile:
-                    outfile.write(infile.read())
-                os.remove(part_filename)
+                outfile.write(results[i])
+        messagebox.showinfo("Download Complete", f"File {filename} downloaded successfully!")
 
 if __name__ == "__main__":
     root = tk.Tk()
