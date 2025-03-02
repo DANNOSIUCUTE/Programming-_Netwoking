@@ -8,11 +8,11 @@ import hashlib
 import time
 
 # Cấu hình chung
-SERVER_IP = "192.168.1.8"  # Cập nhật theo IP của server
+SERVER_IP = "127.0.0.1"  # Cập nhật theo IP của server
 SERVER_PORT = 12345
 TOTAL_CHUNKS = 4         # Số kết nối/chunk theo yêu cầu đồ án
-CHUNK_TIMEOUT = 10       # Timeout cho việc nhận các segment của 1 chunk (điều chỉnh nếu cần)
-MAX_RETRIES = 5
+CHUNK_TIMEOUT = 20       # Timeout cho việc nhận các segment của 1 chunk (điều chỉnh nếu cần)
+MAX_RETRIES = 10
 
 class DownloadClient:
     def __init__(self, root):
@@ -116,23 +116,82 @@ class DownloadClient:
 
         results = [None] * TOTAL_CHUNKS
 
+        # def download_part(part_id, offset, size, progress_label):
+        #     attempts = 0
+        #     segments = {}  # Tích lũy các segment đã nhận được
+        #     expected_segments = None
+        #     HEADER_FORMAT = "!III32s"  # part_id, sequence_number, total_segments, checksum
+        #     HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
+        #     while attempts < MAX_RETRIES:
+        #         sock_part = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        #         sock_part.settimeout(CHUNK_TIMEOUT)
+        #         # Gửi yêu cầu CHUNK đến server (vẫn gửi qua SERVER_PORT)
+        #         sock_part.sendto(f"CHUNK {filename} {offset} {size} {part_id}".encode(), (SERVER_IP, SERVER_PORT))
+        #         start_time = time.time()
+        #         while True:
+        #             try:
+        #                 packet, sender_addr = sock_part.recvfrom(65535)
+        #             except socket.timeout:
+        #                 break
+        #             if packet.startswith(b"ERROR:"):
+        #                 continue
+        #             if len(packet) < HEADER_SIZE:
+        #                 continue
+        #             try:
+        #                 header = packet[:HEADER_SIZE]
+        #                 part_id_recv, seq, tot_seg, chksum_bytes = struct.unpack(HEADER_FORMAT, header)
+        #             except struct.error:
+        #                 continue
+        #             if part_id_recv != part_id:
+        #                 continue
+        #             if expected_segments is None:
+        #                 expected_segments = tot_seg
+        #             data_segment = packet[HEADER_SIZE:]
+        #             computed_checksum = hashlib.md5(data_segment).hexdigest()
+        #             expected_checksum = chksum_bytes.decode()
+        #             if computed_checksum != expected_checksum:
+        #                 continue
+        #             if seq not in segments:
+        #                 segments[seq] = data_segment
+        #                 # Gửi ACK về sender_addr (địa chỉ của socket phụ server)
+        #                 ack_packet = struct.pack("!II", part_id, seq)
+        #                 sock_part.sendto(ack_packet, sender_addr)
+        #                 if expected_segments:
+        #                     progress = int((len(segments) / expected_segments) * 100)
+        #                     self.root.after(0, lambda p=progress, lbl=progress_label: lbl.config(text=f"Part {part_id+1}: {p}%"))
+        #             if expected_segments is not None and len(segments) == expected_segments:
+        #                 break
+        #             if time.time() - start_time > CHUNK_TIMEOUT:
+        #                 break
+        #         sock_part.close()
+        #         if expected_segments is not None and len(segments) == expected_segments:
+        #             break
+        #         attempts += 1
+        #         print(f"Retrying part {part_id}, attempt {attempts}")
+        #     if expected_segments is not None and len(segments) == expected_segments:
+        #         self.root.after(0, lambda lbl=progress_label: lbl.config(text=f"Part {part_id+1}: 100%"))
+        #         chunk_data = b"".join(segments[i] for i in sorted(segments))
+        #         return chunk_data
+        #     else:
+        #         self.root.after(0, lambda lbl=progress_label: lbl.config(text=f"Part {part_id+1}: Failed"))
+        #         return None
         def download_part(part_id, offset, size, progress_label):
             attempts = 0
-            segments = {}  # Tích lũy các segment đã nhận được
+            segments = {}          # Tích lũy các segment đã nhận được
             expected_segments = None
             HEADER_FORMAT = "!III32s"  # part_id, sequence_number, total_segments, checksum
             HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
+
             while attempts < MAX_RETRIES:
                 sock_part = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 sock_part.settimeout(CHUNK_TIMEOUT)
-                # Gửi yêu cầu CHUNK đến server (vẫn gửi qua SERVER_PORT)
                 sock_part.sendto(f"CHUNK {filename} {offset} {size} {part_id}".encode(), (SERVER_IP, SERVER_PORT))
                 start_time = time.time()
                 while True:
                     try:
                         packet, sender_addr = sock_part.recvfrom(65535)
                     except socket.timeout:
-                        break
+                        break  # Thoát vòng lặp inner nếu timeout
                     if packet.startswith(b"ERROR:"):
                         continue
                     if len(packet) < HEADER_SIZE:
@@ -153,12 +212,9 @@ class DownloadClient:
                         continue
                     if seq not in segments:
                         segments[seq] = data_segment
-                        # Gửi ACK về sender_addr (địa chỉ của socket phụ server)
-                        ack_packet = struct.pack("!II", part_id, seq)
-                        sock_part.sendto(ack_packet, sender_addr)
-                        if expected_segments:
-                            progress = int((len(segments) / expected_segments) * 100)
-                            self.root.after(0, lambda p=progress, lbl=progress_label: lbl.config(text=f"Part {part_id+1}: {p}%"))
+                        progress = int((len(segments) / expected_segments) * 100)
+                        self.root.after(0, lambda p=progress, lbl=progress_label: lbl.config(text=f"Part {part_id+1}: {p}%"))
+                        print(f"Part {part_id}: received seq {seq}. Total: {len(segments)}/{expected_segments}")
                     if expected_segments is not None and len(segments) == expected_segments:
                         break
                     if time.time() - start_time > CHUNK_TIMEOUT:
@@ -175,6 +231,7 @@ class DownloadClient:
             else:
                 self.root.after(0, lambda lbl=progress_label: lbl.config(text=f"Part {part_id+1}: Failed"))
                 return None
+
 
         def thread_download(i):
             data_part = download_part(i, offsets[i], sizes[i], chunk_labels[i])
