@@ -7,3 +7,4 @@ files.txt
 Sinh_hoc_buc_xa.pptx
 server.py
 RevoltG.Installer.exe
+1GB.zip
